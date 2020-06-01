@@ -1,0 +1,12 @@
+bin/
+.idea/
+*.exe
+*.obj
+*.ilk
+*.tgz
+*.xml
+*.iml
+*.zip
+*.csv
+*.txt
+tmp/
