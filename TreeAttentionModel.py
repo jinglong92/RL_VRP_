@@ -1,3 +1,5 @@
+import math
+
 import torch.nn as nn
 import torch as t
 import torch.nn.functional as F
@@ -10,11 +12,27 @@ class AttentionModel(nn.Module):
         self.batch = args.batch_size
         self.node_size = args.node_size
         self.M = args.M
-        self.dk = self.embedding_size / self.M  # 多头注意力中每一头的维度
+        self.dk = self.embedding_size // self.M  # 多头注意力中每一头的维度
+        self.dv = self.embedding_size // self.M  # 多头注意力中每一头的维度
+        self.dff = self.embedding_size * 4
         self.C = args.C
+        self.N = 3
 
         self.embedding = nn.Linear(3, self.embedding_size)  # 用于客户点的坐标加容量需求的embedding:[x, y, Cap]
         self.embedding_p = nn.Linear(2, self.embedding_size)  # 用于仓库点的坐标embedding [x, y]
+
+        self.dense_q = nn.ModuleList([nn.Linear(self.embedding_size, self.dk, bias=False) for _ in range(self.N * self.M)])
+        self.dense_v = nn.ModuleList([nn.Linear(self.embedding_size, self.dv, bias=False) for _ in range(self.N * self.M)])
+        self.dense_k = nn.ModuleList([nn.Linear(self.embedding_size, self.dk, bias=False) for _ in range(self.N * self.M)])
+        self.dense_o = nn.ModuleList([nn.Linear(self.dv, self.embedding_size, bias=False) for _ in range(self.N * self.M)])
+
+        self.w_bn = nn.ParameterList([nn.Parameter(t.randn(self.embedding_size)) for _ in range(self.N)])
+        self.b_bn = nn.ParameterList([nn.Parameter(t.randn(self.embedding_size)) for _ in range(self.N)])
+
+        self.dense_ff_0 = nn.ModuleList([nn.Linear(self.embedding_size, self.dff) for _ in range(self.N)])
+        self.dense_ff_1 = nn.ModuleList([nn.Linear(self.dff, self.embedding_size) for _ in range(self.N)])
+
+        self.softmax = nn.Softmax(2)
 
         self.wq1 = nn.Linear(self.embedding_size, self.embedding_size)
         self.wk1 = nn.Linear(self.embedding_size, self.embedding_size)
@@ -39,14 +57,14 @@ class AttentionModel(nn.Module):
         self.q = nn.Linear(self.embedding_size, self.embedding_size)
         self.k = nn.Linear(self.embedding_size, self.embedding_size)
 
-        self.fw1 = nn.Linear(self.embedding_size, self.embedding_size * 4)
-        self.fb1 = nn.Linear(self.embedding_size * 4, self.embedding_size)
+        self.fw1 = nn.Linear(self.embedding_size, self.dff)
+        self.fb1 = nn.Linear(self.dff, self.embedding_size)
 
-        self.fw2 = nn.Linear(self.embedding_size, self.embedding_size * 4)
-        self.fb2 = nn.Linear(self.embedding_size * 4, self.embedding_size)
+        self.fw2 = nn.Linear(self.embedding_size, self.dff)
+        self.fb2 = nn.Linear(self.dff, self.embedding_size)
 
-        self.fw3 = nn.Linear(self.embedding_size, self.embedding_size * 4)
-        self.fb3 = nn.Linear(self.embedding_size * 4, self.embedding_size)
+        self.fw3 = nn.Linear(self.embedding_size, self.dff)
+        self.fb3 = nn.Linear(self.dff, self.embedding_size)
 
         # Batch Normalization(BN)
         self.BN11 = nn.BatchNorm1d(self.embedding_size)
@@ -56,12 +74,7 @@ class AttentionModel(nn.Module):
         self.BN31 = nn.BatchNorm1d(self.embedding_size)
         self.BN32 = nn.BatchNorm1d(self.embedding_size)
 
-    # s坐标，d需求，l初始容量, train==0表示无需计算梯度且使用greedy方法，train>0表示需要计算梯度且使用sampling方法
-    def forward(self, s, d, l, train, DEVICE):
-        mask_size = t.LongTensor(self.batch).to(DEVICE)  # 用于标号，方便后面两点间的距离计算
-        for i in range(self.batch):
-            mask_size[i] = self.node_size * i  # depot对应的编号
-        # 生成距离关系，类似distance matrix
+    def cal_distance(self, s):
         # s :[batch x seq_len x 2]
         s1 = t.unsqueeze(s, dim=1)  # 在s中指定位置N加上一个维数为1的维度
         s1 = s1.expand(self.batch, self.node_size, self.node_size, 2)  # 返回当前张量在某维扩展更大后的张量
@@ -69,17 +82,54 @@ class AttentionModel(nn.Module):
         s2 = s2.expand(self.batch, self.node_size, self.node_size, 2)
         ss = s1 - s2  # 坐标差
         dis = t.norm(ss, 2, dim=3, keepdim=True)  # dis表示任意两点间的距离 (batch, node_size, node_size, 1)
+        return dis
+
+    def single_head_attention(self, x, n):
+        h = 0
+        for m in range(self.M):
+            q = self.dense_q[n * self.M + m](x)
+            v = self.dense_v[n * self.M + m](x)
+            k = self.dense_k[n * self.M + m](x)
+            k_t = t.transpose(k, 1, 2)
+            u = t.bmm(q, k_t) / math.sqrt(self.dk)
+            s = self.softmax(u)
+            tt = t.bmm(s, v)
+            h += self.dense_o[n * self.M + m](tt)
+        return h
+
+    def feed_forward(self, x, n):
+        h_0 = F.relu(self.dense_ff_0[n](x))
+        h_1 = self.dense_ff_1[n](h_0)
+        return h_1
+
+    def multi_head_attention(self, h, x):
+        self.bn = nn.BatchNorm1d(x.size()[1], affine=False)
+        for n in range(self.N):
+            h_mha = self.single_head_attention(h, n)
+            h_bn = self.w_bn[n] * self.bn(h + h_mha) + self.b_bn[n]
+            h_ff = self.feed_forward(h_bn, n)
+            h = self.w_bn[n] * self.bn(h_bn + h_ff) + self.b_bn[n]
+
+        return h
+
+    # s坐标，d需求，capacity初始容量
+    def forward(self, s, d, capacity, train, DEVICE):
+        mask_size = t.LongTensor(self.batch).to(DEVICE)  # 用于标号，方便后面两点间的距离计算
+        for i in range(self.batch):
+            mask_size[i] = self.node_size * i  # depot对应的编号
+        # 生成距离关系，类似distance matrix
+        dis = self.cal_distance(s)
         # 定义各变量Tensor
         pro = t.FloatTensor(self.batch, self.node_size * 2).to(DEVICE)  # 每个点被选取时的选取概率,将其连乘可得到选取整个路径的概率
         seq = t.LongTensor(self.batch, self.node_size * 2).to(DEVICE)  # 选取的序列
         vehicle_index = t.LongTensor(self.batch).to(DEVICE)  # 当前车辆所在的点
         tag = t.ones(self.batch * self.node_size).to(DEVICE)
         distance = t.zeros(self.batch).to(DEVICE)  # 总距离
-        rest = t.LongTensor(self.batch, 1, 1).to(DEVICE)  # 车的剩余容量
-        demand = t.LongTensor(self.batch, self.node_size).to(DEVICE)  # 客户需求
+        rest_cap = t.LongTensor(self.batch, 1, 1).to(DEVICE)  # 车的剩余容量
+        demand = t.LongTensor(self.batch, self.node_size).to(DEVICE)  # 客户需求 [batch, batch]
 
         # node input 初始化：初始容量，负荷需求，初始位置
-        rest[:, 0, 0] = l  # 初始化车的初始容量
+        rest_cap[:, 0, 0] = capacity  # 初始化车的初始容量
         demand[:, :] = d[:, :, 0]  # 需求
         vehicle_index[:] = 0
         feature = t.cat([s, d.float()], dim=2)  # [batch x seq_len x 3] 坐标与容量需求拼接
@@ -87,11 +137,14 @@ class AttentionModel(nn.Module):
         ################################ encoder #####################################
         # node embedding
         node = self.embedding(feature)  # 客户点embedding坐标加容量需求[batch x seq_len x 3] * [3, embedding_size]
+        # todo depot 不需要单独处理？
         node[:, 0, :] = self.embedding_p(s[:, 0, :])  # 仓库点只embedding坐标
         node_embedding = node  # [batch x seq_len x embedding_dim]
 
-        # x = self.encoder(feature, s, d, l)  # feature
+        # x = self.encoder(feature, s, d, capacity)  # feature
         #######################################################################
+        x_compare = self.multi_head_attention(node, feature)
+
         # 第一个MHA attention layer, 8层，
         query1 = self.wq1(node)
         query1 = t.unsqueeze(query1, dim=2)
@@ -219,6 +272,7 @@ class AttentionModel(nn.Module):
         x = self.BN32(x)
         x = x.permute(0, 2, 1)  # h_i^(l) n=3 (batch, node_size, embedding_size)
         x = x.contiguous()
+
         # graph embedding
         avg = t.mean(x, dim=1)  # 最后将所有节点的嵌入信息取平均得到整个图的嵌入信息，(batch, embedding_size)
 
@@ -241,7 +295,7 @@ class AttentionModel(nn.Module):
             tag[ind] = 0  # tag:(batch*node_size)
             start = x.view(-1, self.embedding_size)[ind]  # (batch, embedding_size)，每个batch中选出一个节点
 
-            end = rest[:, :, 0]  # (batch, 1)
+            end = rest_cap[:, :, 0]  # (batch, 1)
             end = end.float()  # 车上剩余容量
 
             # 1.1结合图embedding，当前点embedding，车剩余容量: (batch,embedding_size*2 + 1)_
@@ -257,7 +311,7 @@ class AttentionModel(nn.Module):
             temp = temp / (self.dk ** 0.5)
             # 1.2 mask: set u_{(c)j} = -inf
             mask = tag.view(self.batch, -1, 1) < 0.5  # 访问过的点tag=0
-            mask1 = demand.view(self.batch, self.node_size, 1) > rest.expand(self.batch, self.node_size,
+            mask1 = demand.view(self.batch, self.node_size, 1) > rest_cap.expand(self.batch, self.node_size,
                                                                              1)  # 客户需求大于车剩余容量的点
 
             flag = t.nonzero(vehicle_index).view(-1)  # 在batch中取得当前车不在仓库点的batch号
@@ -297,7 +351,7 @@ class AttentionModel(nn.Module):
             p = F.softmax(temp, dim=1)  # 得到选取每个点时所有点可能被选择的概率
             # 2.5 对需求不全为0的batch，进行抽样（按照概率p抽取一个点）或直接选择概率最大的点
             indexx = t.LongTensor(self.batch).to(DEVICE)
-            if train > 0:
+            if train == 'sampling':
                 indexx[f1] = t.multinomial(p[f1], 1)[:, 0]  # 按sampling策略选点
             else:
                 # 语法：(t.max(p[f1], dim=1)[0] 为value, ()[1]为index
@@ -307,7 +361,7 @@ class AttentionModel(nn.Module):
             p = p.view(-1)
             pro[:, i] = p[indexx + mask_size]
             pro[f2, i] = 1
-            rest = rest - (demand.view(-1)[indexx + mask_size]).view(self.batch, 1, 1)  # 车的剩余容量
+            rest_cap = rest_cap - (demand.view(-1)[indexx + mask_size]).view(self.batch, 1, 1)  # 车的剩余容量
             demand = demand.view(-1)
             demand[indexx + mask_size] = 0
             demand = demand.view(self.batch, self.node_size)
@@ -317,12 +371,12 @@ class AttentionModel(nn.Module):
 
             mask3 = indexx == 0
             mask3 = mask3.view(self.batch, 1, 1)
-            rest.masked_fill_(mask3, l)  # 车回到仓库将容量设为初始值
+            rest_cap.masked_fill_(mask3, capacity)  # 车回到仓库将容量设为初始值
 
             vehicle_index = indexx
             seq[:, i] = vehicle_index[:]
 
-        if train == 0:
+        if train == 'greedy':
             seq = seq.detach()
             pro = pro.detach()
             distance = distance.detach()

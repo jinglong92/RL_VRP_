@@ -10,3 +10,5 @@ bin/
 *.csv
 *.txt
 tmp/
+__pycache__/
+docs/
