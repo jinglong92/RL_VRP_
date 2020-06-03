@@ -32,7 +32,7 @@ def get_arg_parser(title):
     data_group.add_argument('--batch_size', type=int, default=512)  # 每个batch的算例数
     data_group.add_argument('--inner_times', type=int, default=2500)  # 训练中每个epoch所需的训练batch数
     data_group.add_argument('--epochs', type=int, default=100)  # 训练的epoch总数
-    data_group.add_argument('--capacity', type=float, default=30)  # 车辆的初始容量
+    data_group.add_argument('--capacity', type=float, default=30000)  # 车辆的初始容量
     data_group.add_argument('--num_MLP_layers', type=int, default=2)
     data_group.add_argument('--embedding_size', type=int, default=128)
     data_group.add_argument('--attention_size', type=int, default=16)

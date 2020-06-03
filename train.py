@@ -5,6 +5,20 @@ import torch as t
 import torch.nn as nn
 
 
+# 配对样本T检验标准分T=(x−μ)/(s/sqrt(n)),当前Sampling的解效果显著好于greedy的解效果,则更新使用greedy策略作为baseline的net2参数
+def OneSidedPairedTTest(args, dis1, dis2, baseNet, RolloutNet):
+    # (paired t-检验,当前Sampling的解效果是否显著好于greedy的解效果,如是,则更新使用greedy策略作为baseline的net2参数)
+    if (dis1.mean() - dis2.mean()) < 0:
+        t_statistic, p_value = ttest_rel(dis1.cpu().numpy(), dis2.cpu().numpy())
+        p_value = p_value / 2
+        assert t_statistic < 0, "T-statistic should be negative"
+        if p_value < args.p_threshold:  # If the p-value is smaller than the threshold, e.g. 1%, 5% or 10%,
+            # then we reject the null hypothesis of equal averages.
+            print(' ------------- Update baseline ------------- ')
+            baseNet.load_state_dict(RolloutNet.state_dict())
+    return baseNet
+
+
 def train(args, opt, baseNet, RolloutNet):
     DEVICE = args.DEVICE
     tS, tD, S, D = data_gen(args.batch_size, args.test2save_times, args.node_size, args.inner_times)
@@ -28,8 +42,10 @@ def train(args, opt, baseNet, RolloutNet):
 
             t1 = time.time()
             # 被选取的点序列,每个点被选取时的选取概率,这些序列的总路径长度
-            seq2, pro2, dis2 = baseNet(s, d, args.capacity, 'greedy', DEVICE)  # baseline
-            seq1, pro1, dis1 = RolloutNet(s, d, args.capacity, 'sampling', DEVICE)  # samplingRollout
+            children_seq2, father_seq2, pro2, dis2 = baseNet(s, d, args.capacity, 'greedy', DEVICE)  # baseline
+            # seq2, pro2, dis2 = baseNet(s, d, args.capacity, 'greedy', DEVICE)  # baseline
+            children_seq1, father_seq1, pro1, dis1 = RolloutNet(s, d, args.capacity, 'sampling', DEVICE)  # samplingRollout
+            # seq1, pro1, dis1 = RolloutNet(s, d, args.capacity, 'sampling', DEVICE)  # samplingRollout
             t2 = time.time()
             # print('nn_output_time={}'.format(t2 - t1))
             ######################### forward + backward + optimize ##############################
@@ -48,16 +64,8 @@ def train(args, opt, baseNet, RolloutNet):
             print('epoch={}, i={}, mean_dis1={}, mean_dis2={}'.format(epoch, i, t.mean(dis1), t.mean(dis2)))
             # ,'disloss:',t.mean((dis1-dis2)*(dis1-dis2)), t.mean(t.abs(dis1-dis2)), nan)
 
-            ################# OneSidedPairedTTest: 配对样本T检验标准分T=(x−μ)/(s/sqrt(n)) #####################
-            # (paired t-检验,当前Sampling的解效果是否显著好于greedy的解效果,如是,则更新使用greedy策略作为baseline的net2参数)
-            if (dis1.mean() - dis2.mean()) < 0:
-                t_statistic, p_value = ttest_rel(dis1.cpu().numpy(), dis2.cpu().numpy())
-                p_value = p_value / 2
-                assert t_statistic < 0, "T-statistic should be negative"
-                if p_value < args.p_threshold:  # If the p-value is smaller than the threshold, e.g. 1%, 5% or 10%,
-                    # then we reject the null hypothesis of equal averages.
-                    print(' ------------- Update baseline ------------- ')
-                    baseNet.load_state_dict(RolloutNet.state_dict())
+            ################# OneSidedPairedTTest#####################
+            baseNet = OneSidedPairedTTest(args, dis1, dis2, baseNet, RolloutNet)
             ################# 每隔100步做测试判断结果有没有改进，如果改进了则把当前模型保存下来 #####################
             if (i + 1) % args.log_interval == 0:
                 length = t.zeros(1).to(DEVICE)
@@ -67,7 +75,7 @@ def train(args, opt, baseNet, RolloutNet):
                     d = tD[j * args.batch_size: (j + 1) * args.batch_size]
                     s = s.to(DEVICE)
                     d = d.to(DEVICE)
-                    seq, pro, dis = RolloutNet(s, d, args.capacity, 'greedy')
+                    children_seq, father_seq, pro, dis = RolloutNet(s, d, args.capacity, 'greedy')
                     length = length + t.mean(dis)
                 mean_len = length / args.test2save_times
                 if mean_len < min_length:

@@ -5,6 +5,7 @@ bin/
 *.ilk
 *.tgz
 *.xml
+*.pyc
 *.iml
 *.zip
 *.csv
