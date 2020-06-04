@@ -80,20 +80,22 @@ class AttentionModel(nn.Module):
         dis = self.cal_distance(s)
         # 定义各变量Tensor
         # pro = t.FloatTensor(self.batch, self.node_size * 2).to(DEVICE)  # 每个点被选取时的选取概率,将其连乘可得到选取整个路径的概率
-        pro = t.FloatTensor(self.batch, self.node_size * 4).to(DEVICE)  # 每个点被选取时的选取概率,将其连乘可得到选取整个路径的概率
+        pro = t.FloatTensor(self.batch, self.node_size * 2).to(DEVICE)  # 每个点被选取时的选取概率,将其连乘可得到选取整个路径的概率
         # seq = t.LongTensor(self.batch, self.node_size * 2).to(DEVICE)  # 选取的序列
-        children_seq = t.LongTensor(self.batch, self.node_size * 2 * 2).to(DEVICE)  # 选取的序列
-        father_seq = t.LongTensor(self.batch, self.node_size * 2).to(DEVICE)  # 选取的序列
-        vehicle_index = t.LongTensor(self.batch).to(DEVICE)  # 当前车辆所在的点
+        children_seq = t.LongTensor(self.batch, self.node_size).to(DEVICE)  # 选取的序列
+        father_seq = t.LongTensor(self.batch, self.node_size//2).to(DEVICE)  # 选取的序列
+        father_index = t.LongTensor(self.batch).to(DEVICE)  # 当前车辆所在的点
         tag = t.ones(self.batch * self.node_size).to(DEVICE)
         distance = t.zeros(self.batch).to(DEVICE)  # 总距离
         rest_cap = t.LongTensor(self.batch, 1, 1).to(DEVICE)  # 车的剩余容量
         demand = t.LongTensor(self.batch, self.node_size).to(DEVICE)  # 客户需求 [batch, batch]
 
+        not_visited = t.LongTensor(self.batch, 1).to(DEVICE)  # n_tree: 2
+
         # node input 初始化：初始容量，负荷需求，初始位置
         rest_cap[:, 0, 0] = capacity  # 初始化车的初始容量
         demand[:, :] = d[:, :, 0]  # 需求
-        vehicle_index[:] = 0
+        father_index[:] = 0
         feature = t.cat([s, d.float()], dim=2)  # [batch x seq_len x 3] 坐标与容量需求拼接
 
         ################################ encoder #####################################
@@ -233,10 +235,10 @@ class AttentionModel(nn.Module):
         x = x.contiguous()
 
         # graph embedding
-        avg = t.mean(x, dim=1)  # 最后将所有节点的嵌入信息取平均得到整个图的嵌入信息(batch, embedding_size)
+        graph_embedding_avg = t.mean(x, dim=1)  # 最后将所有节点的嵌入信息取平均得到整个图的嵌入信息(batch, embedding_size)
 
         ################################# decoder ######################################
-        for i in range(self.node_size * 2):  # decoder输出序列的长度不超过node_size * 2
+        for i in range(self.node_size//2):  # decoder输出序列的长度不超过node_size * 2
             flag = t.sum(demand, dim=1)  # demand:(batch, self.node_size)
             demand_index = t.nonzero(flag > 0).view(-1)  # 取得需求不全为0的batch号
             zero_demand_index = t.nonzero(flag == 0).view(-1)  # 取得需求全为0的batch号
@@ -246,23 +248,29 @@ class AttentionModel(nn.Module):
                 children_seq[:, 2*i:] = -1  # swq:(batch, node_size*2)
                 father_seq[:, i:] = 0  # swq:(batch, node_size*2)
                 # seq[:, i:] = 0  # swq:(batch, node_size*2)
-                temp = dis.view(-1, self.node_size, 1)[vehicle_index + mask_size]
+                ### 负荷全部满足，回depot
+                # temp = dis.view(-1, self.node_size, 1)[father_index + mask_size]
                 # dis:任意两点间的距离 (batch, node_size, node_size, 1) temp:(batch, node_size,1)
-                distance = distance + temp.view(-1)[mask_size]  # 加上当前点到仓库的距离
+                # distance = distance + temp.view(-1)[mask_size]  # 加上当前点到仓库的距离
                 break
 
             ### 1.开始构造：Context embedding ###
-            ind = vehicle_index + mask_size
-            tag[ind] = 0  # tag:(batch*node_size)   将待加入节点标记为0
-            start = x.view(-1, self.embedding_size)[ind]  # (batch, embedding_size)，每个batch中选出一个节点
+            root_ind = father_index + mask_size
+            # print('father', father_index[0], father_index[1])
+            # 已经添加到树上的节点进行tag 0, for masking
+            if i > 0:
+                visited_node = (new_node + mask_size.unsqueeze(1).expand(self.batch, 2)).view(-1)
+                tag[visited_node] = 0
 
-            cap = rest_cap[:, :, 0]  # (batch, 1)
-            cap = cap.float()  # 车上剩余容量
+            else:
+                tag[root_ind] = 0  # tag:(batch*node_size)   将初始节点标记为0
+            root_embedding = x.view(-1, self.embedding_size)[root_ind]  # (batch, embedding_size)，每个batch中选出一个节点
+            # 车上剩余容量
+            cap = rest_cap[:, :, 0].float()  # (batch, 1)
 
-            # 1.1结合图embedding，当前点embedding，车剩余容量: (batch, embedding_size*2 + 1)_
-            # todo start 如何选择
-            graph = t.cat([avg, start, cap], dim=1)
-            query = self.wq(graph)  # (batch, embedding_size)
+            # 1.1结合图embedding，当前点root的embedding，剩余容量: (batch, embedding_size*2 + 1)_
+            context_embedding = t.cat([graph_embedding_avg, root_embedding, cap], dim=1)
+            query = self.wq(context_embedding)  # (batch, embedding_size)
             query = t.unsqueeze(query, dim=1)
             query = query.expand(self.batch, self.node_size, self.embedding_size)
             key = self.wk(x)
@@ -275,13 +283,13 @@ class AttentionModel(nn.Module):
             visited_mask = tag.view(self.batch, -1, 1) < 0.5  # 访问过的点tag=0
             lack_cap_mask = demand.view(self.batch, self.node_size, 1) \
                             > rest_cap.expand(self.batch, self.node_size, 1)  # 客户需求大于车剩余容量的点
-
-            active_flag = t.nonzero(vehicle_index).view(-1)  # 在batch中取得当前车不在仓库点的batch号
             mask = visited_mask + lack_cap_mask  # mask:(batch x node_size x 1)
             mask = mask > 0
             mask[zero_demand_index, 0, 0] = 0  # 需求全为0则使车一直在仓库
-            if active_flag.size()[0] > 0:  # 车离开仓库的batch开放，即mask置为False
-                mask[active_flag, 0, 0] = False
+            # 车离开仓库的batch开放，即mask置为False
+            # active_flag = t.nonzero(father_index).view(-1)  # 在batch中取得当前车不在仓库点的batch号
+            # if active_flag.size()[0] > 0:
+            #     mask[active_flag, 0, 0] = False
             mask = mask.expand(self.batch, self.node_size, self.M)  # expand for MHA
 
             # 1.3 将mask为True的节点置为-inf
@@ -313,19 +321,20 @@ class AttentionModel(nn.Module):
             p = F.softmax(temp, dim=1)  # 得到选取每个点时所有点可能被选择的概率
             # 2.5 对需求不全为0的batch，进行抽样（按照概率p抽取一个点）或直接选择概率最大的点
             # indexx = t.LongTensor(self.batch).to(DEVICE)
-            alt_node_id = t.LongTensor(self.batch, 2).to(DEVICE)  # n_tree: 2
+            new_node = t.LongTensor(self.batch, 2).to(DEVICE)  # n_tree: 2
             if train == 'sampling':
                 # indexx[demand_index] = t.multinomial(p[demand_index], 1)[:, 0]  # 按sampling策略选点
-                alt_node_id[demand_index] = t.multinomial(p[demand_index], 2)
+                new_node[demand_index] = t.multinomial(p[demand_index], 2)
             else:
                 # 语法：(t.max(p[demand_index], dim=1)[0] 为value, ()[1]为index
                 # indexx[demand_index] = (t.max(p[demand_index], dim=1)[1])  # 按greedy策略选点
-                _, alt_node_id[demand_index] = p[demand_index].topk(2)  # 获取topk个节点作为备选路径
+                _, new_node[demand_index] = p[demand_index].topk(2)  # 获取topk个节点作为备选路径
 
             # indexx[zero_demand_index] = 0
-            alt_node_id[zero_demand_index] = 0
+            new_node[zero_demand_index] = 0
+            # print('children:', new_node[0], new_node[1])
             mask_size_tmp = mask_size.unsqueeze(1).expand(self.batch, 2)
-            alt_node_index = alt_node_id + mask_size_tmp  # [batch, 2]
+            alt_node_index = new_node + mask_size_tmp  # [batch, 2]
             # p = p.view(-1)
             # pro[:, i] = p[indexx + mask_size]
             pro[zero_demand_index, i] = 1
@@ -334,32 +343,31 @@ class AttentionModel(nn.Module):
             pro[:, 2 * i: 2 * i + 2] = p_tmp[alt_node_index]
             pro[zero_demand_index, 2 * i: 2 * i + 2] = 1
             # rest_cap = rest_cap - (demand.view(-1)[indexx + mask_size]).view(self.batch, 1, 1)  # 车的剩余容量
-            # 车的剩余容量 = 原来的容量 - 该节点分支的两棵树总负荷
+            # 车的剩余容量 = 原来的容量 - 该节点分支的两个children的总负荷
             rest_cap = rest_cap - t.sum(demand.view(-1)[alt_node_index], dim=1).view(self.batch, 1, 1)  # 车的剩余容量
             demand = demand.view(-1)
             # demand[indexx + mask_size] = 0
-            ith_visited_index = alt_node_index.view(-1)  # [batch, 2] -> [batch, * 2, 1]
+            ith_visited_index = alt_node_index.view(-1)  # [batch, 2] -> [batch, 2, 1]
             demand[ith_visited_index] = 0  # 访问过的节点负荷置零
             demand = demand.view(self.batch, self.node_size)  # 回复原来负荷形状[batch, node_size]
 
-            # temp = dis.view(-1, self.node_size, 1)[vehicle_index + mask_size]
-            temp = dis.view(-1, self.node_size, 1)[vehicle_index + mask_size]  # [batch, node_size, 1]
+            # temp = dis.view(-1, self.node_size, 1)[father_index + mask_size]
+            temp = dis.view(-1, self.node_size, 1)[father_index + mask_size]  # [batch, node_size, 1]
             # distance = distance + temp.view(-1)[indexx + mask_size]
             distance = distance + t.sum(temp.view(-1)[alt_node_index], 1)
-            # 车回到仓库
-            # mask3 = indexx == 0
-            # mask3 = alt_node_index == 0
-            # mask3 = mask3.view(self.batch, 1, 1)
-            # rest_cap.masked_fill_(mask3, capacity)  # 车回到仓库将容量设为初始值
-            select_root = t.randint(0, 2, [self.batch, 1]) == 0
-            aa = t.BoolTensor(self.batch, 2)
-            aa[:, 0] = select_root.view(-1)
-            aa[:, 1] = select_root.view(-1) == 0
-            # vehicle_index = indexx
-            vehicle_index = alt_node_id[aa]
-            children_seq[:, 2*i: 2*i+2] = alt_node_id[:]
-            father_seq[:, i] = vehicle_index[:]
-            # seq[:, i] = vehicle_index[:]
+            # 按列拼接,获得所有可供选择的节点
+            if i > 0:
+                all_alt = t.cat((not_visited, new_node), 1)
+            else:
+                all_alt = new_node
+            # 二维tensor randperm()
+            all_alt_shuffled = all_alt[:, t.randperm(all_alt.size(1))]
+            father_index = all_alt_shuffled[:, 0]   # [batch, 1]
+            not_visited = all_alt_shuffled[:, 1:]  # [batch, 1]
+
+            children_seq[:, 2*i: 2*i+2] = new_node[:]
+            father_seq[:, i] = father_index[:]
+            # seq[:, i] = father_index[:]
 
         if train == 'greedy':
             # seq = seq.detach()

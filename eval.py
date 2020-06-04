@@ -5,10 +5,10 @@ import torch as t
 # 测试部分
 def evaluate(args, RolloutNet, map_location):
     DEVICE = args.DEVICE
-    RolloutNet.load_state_dict(t.load('cvrp-AM-model/AM_VRP20.pt', map_location=map_location))
+    RolloutNet.load_state_dict(t.load('tree_am/AM_VRP20.pt', map_location=map_location))
     # 按照greedy策略测试
     if args.rollout_method == 'greedy':
-        tS = t.rand(args.batch_size * args.test_times, args.node_size, 2) * 2  # 坐标0~1之间
+        tS = t.rand(args.batch_size * args.test_times, args.node_size, 2)  # 坐标0~1之间
         tD = np.random.randint(1, 10, size=(args.batch_size * args.test_times, args.node_size, 1))  # 所有客户的需求
         tD = t.LongTensor(tD)
         tD[:, 0, 0] = 0  # 仓库点的需求为0
@@ -22,7 +22,7 @@ def evaluate(args, RolloutNet, map_location):
             s = s.to(DEVICE)
             d = d.to(DEVICE)
             clock1 = time.time()
-            seq, pro, dis = RolloutNet(s, d, args.capacity, 0, args.DEVICE)
+            children_seq, father_seq, pro, dis = RolloutNet(s, d, args.capacity, 'greedy', args.DEVICE)
             clock2 = time.time()
             deta_clock = clock2 - clock1
             sum_clock = sum_clock + deta_clock
@@ -55,7 +55,7 @@ def evaluate(args, RolloutNet, map_location):
                 d = tD[i].repeat(args.batch_size, 1, 1).to(DEVICE)
 
                 clock1 = time.time()
-                seq, pro, dis = RolloutNet(s, d, args.capacity, 1, args.DEVICE)
+                children_seq, father_seq, pro, dis = RolloutNet(s, d, args.capacity, 'sampling', args.DEVICE)
                 clock2 = time.time()
 
                 mini_deta_clock = clock2 - clock1
