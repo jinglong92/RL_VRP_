@@ -13,6 +13,8 @@ t.manual_seed(111)
 random.seed(111)
 np.random.seed(111)
 
+wart_start = True
+
 if __name__ == '__main__':
     argParser = arguments.get_arg_parser("tree")
     args = argParser.parse_args()
@@ -22,18 +24,20 @@ if __name__ == '__main__':
         map_location = None
     else:
         DEVICE = t.device('cpu')
-        map_location = 'cpu'
+        map_location = t.device('cpu')
     args.DEVICE = DEVICE
 
     save_dir = os.path.join(os.getcwd(), args.output_dir)
     # 构建两个相同结构的net,参数定期同步
     RolloutNet = AttentionModel(args)
     RolloutNet = RolloutNet.to(DEVICE)
+    if wart_start:
+        RolloutNet.load_state_dict(t.load('tree_am/epoch0-i1299-dis_8.94567.pt', map_location=map_location))
     baseNet = AttentionModel(args)
     baseNet = baseNet.to(DEVICE)
     baseNet.load_state_dict(RolloutNet.state_dict())
 
-    is_train = True  # 是
+    is_train = False  # 是
     if is_train:
         if args.optimizer == 'adam':
             optimizer = optim.Adam(RolloutNet.parameters(), lr=args.lr)
@@ -44,7 +48,7 @@ if __name__ == '__main__':
         else:
             raise ValueError('optimizer undefined: ', args.optimizer)
         # 训练部分
-        train(args, optimizer, baseNet, RolloutNet)
+        train(args, optimizer, baseNet, RolloutNet, save_dir)
     else:
         # 测试部分
         evaluate(args, RolloutNet, map_location)

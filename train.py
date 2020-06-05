@@ -3,6 +3,7 @@ from scipy.stats import ttest_rel
 import time
 import torch as t
 import torch.nn as nn
+import os
 
 
 # 配对样本T检验标准分T=(x−μ)/(s/sqrt(n)),当前Sampling的解效果显著好于greedy的解效果,则更新使用greedy策略作为baseline的net2参数
@@ -27,18 +28,10 @@ def loss_function(args, pro1, dis_rollout, dis_baseline):
     return loss
 
 
-def train(args, opt, baseNet, RolloutNet):
+def train(args, opt, baseNet, RolloutNet, save_dir):
     DEVICE = args.DEVICE
+    min_length = float('inf')
     tS, tD, S, D = data_gen(args.batch_size, args.test2save_times, args.node_size, args.inner_times)
-    # # print model's state_dict, 学习的权重和偏执系数, 卷积层和全连接层的参数
-    # print('Model.state_dict:')
-    # for param_tensor in RolloutNet.state_dict():
-    #     print(param_tensor, '\t', RolloutNet.state_dict()[param_tensor].size())  # 打印 key value字典
-    #
-    # # print optimizer's state_dict, 包含state和param_groups的字典对象
-    # print('Optimizer,s state_dict:')
-    # for var_name in opt.state_dict():
-    #     print(var_name, '\t', opt.state_dict()[var_name])
 
     for epoch in range(args.epochs):
         for i in range(args.inner_times):
@@ -74,7 +67,7 @@ def train(args, opt, baseNet, RolloutNet):
                     d = tD[j * args.batch_size: (j + 1) * args.batch_size]
                     s = s.to(DEVICE)
                     d = d.to(DEVICE)
-                    children_seq, father_seq, pro, dis = RolloutNet(s, d, args.capacity, 'greedy')
+                    children_seq, father_seq, pro, dis = RolloutNet(s, d, args.capacity, 'greedy', DEVICE)
                     length = length + t.mean(dis)
                 mean_len = length / args.test2save_times
                 if mean_len < min_length:

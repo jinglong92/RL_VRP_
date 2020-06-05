@@ -1,11 +1,12 @@
 import time
 import torch as t
+import numpy as np
 
 
 # 测试部分
 def evaluate(args, RolloutNet, map_location):
     DEVICE = args.DEVICE
-    RolloutNet.load_state_dict(t.load('tree_am/AM_VRP20.pt', map_location=map_location))
+    RolloutNet.load_state_dict(t.load('tree_am/epoch0-i1299-dis_8.94567.pt', map_location=map_location))
     # 按照greedy策略测试
     if args.rollout_method == 'greedy':
         tS = t.rand(args.batch_size * args.test_times, args.node_size, 2)  # 坐标0~1之间
@@ -61,7 +62,7 @@ def evaluate(args, RolloutNet, map_location):
                 mini_deta_clock = clock2 - clock1
                 deta_clock = deta_clock + mini_deta_clock
                 for j in range(args.batch_size):
-                    available_seq.append(seq[j])
+                    available_seq.append(children_seq[j])
                     available_dis.append(dis[j])
 
             available_seq = t.stack(available_seq)

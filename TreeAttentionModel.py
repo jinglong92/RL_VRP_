@@ -3,6 +3,7 @@ import math
 import torch.nn as nn
 import torch as t
 import torch.nn.functional as F
+# from Encoder import *
 
 
 class AttentionModel(nn.Module):
@@ -20,6 +21,8 @@ class AttentionModel(nn.Module):
 
         self.embedding = nn.Linear(3, self.embedding_size)  # 用于客户点的坐标加容量需求的embedding:[x, y, Cap]
         self.embedding_p = nn.Linear(2, self.embedding_size)  # 用于仓库点的坐标embedding [x, y]
+
+        # self.encoder = Encoder(args, self.N, self.M)
 
         self.wq1 = nn.Linear(self.embedding_size, self.embedding_size)
         self.wk1 = nn.Linear(self.embedding_size, self.embedding_size)
@@ -99,6 +102,7 @@ class AttentionModel(nn.Module):
         feature = t.cat([s, d.float()], dim=2)  # [batch x seq_len x 3] 坐标与容量需求拼接
 
         ################################ encoder #####################################
+        # graph_embedding_avg, x = self.encoder(feature, s)
         # node embedding
         node = self.embedding(feature)  # 客户点embedding坐标加容量需求[batch x seq_len x 3] * [3, embedding_size]
         # todo depot 不需要单独处理？
