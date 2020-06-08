@@ -7,13 +7,13 @@ import numpy as np
 from conf import arguments
 from train import *
 from eval import *
-from TreeAttentionModel import *
+from nets.TreeAttentionModel import *
 
 t.manual_seed(111)
 random.seed(111)
 np.random.seed(111)
 
-wart_start = True
+wart_start = False
 
 if __name__ == '__main__':
     argParser = arguments.get_arg_parser("tree")
@@ -37,7 +37,7 @@ if __name__ == '__main__':
     baseNet = baseNet.to(DEVICE)
     baseNet.load_state_dict(RolloutNet.state_dict())
 
-    is_train = False  # 是
+    is_train = True  # 是
     if is_train:
         if args.optimizer == 'adam':
             optimizer = optim.Adam(RolloutNet.parameters(), lr=args.lr)

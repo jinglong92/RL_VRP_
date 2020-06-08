@@ -4,6 +4,7 @@ import torch.nn as nn
 import torch as t
 import torch.nn.functional as F
 # from Encoder import *
+from nets.graph_encoder import *
 
 
 class AttentionModel(nn.Module):
@@ -17,12 +18,21 @@ class AttentionModel(nn.Module):
         self.dv = self.embedding_size // self.M  # 多头注意力中每一头的维度
         self.dff = self.embedding_size * 4
         self.C = args.C
-        self.N = 3
+        self.n_encode_layers = 3
+        self.normalization = 'batch'
+
+        self.embedder = GraphAttentionEncoder(
+            n_heads=self.M,  # n_heads
+            embed_dim=self.embedding_size,
+            n_layers=self.n_encode_layers,
+            normalization=self.normalization
+        )
+        print(self.embedder)
 
         self.embedding = nn.Linear(3, self.embedding_size)  # 用于客户点的坐标加容量需求的embedding:[x, y, Cap]
         self.embedding_p = nn.Linear(2, self.embedding_size)  # 用于仓库点的坐标embedding [x, y]
 
-        # self.encoder = Encoder(args, self.N, self.M)
+        # self.encoder = Encoder(args, self.n_encode_layers, self.M)
 
         self.wq1 = nn.Linear(self.embedding_size, self.embedding_size)
         self.wk1 = nn.Linear(self.embedding_size, self.embedding_size)
@@ -109,137 +119,139 @@ class AttentionModel(nn.Module):
         node[:, 0, :] = self.embedding_p(s[:, 0, :])  # 仓库点只embedding坐标
         node_embedding = node  # [batch x seq_len x embedding_dim]
 
+        # embeddings, _ = self.embedder(self._init_embed(input))
+        x, graph_embedding_avg = self.embedder(node_embedding)
         #######################################################################
         # 第一个MHA attention layer, 8层，
-        query1 = self.wq1(node)
-        query1 = t.unsqueeze(query1, dim=2)
-        query1 = query1.expand(self.batch, self.node_size, self.node_size, self.embedding_size)
-        key1 = self.wk1(node)
-        key1 = t.unsqueeze(key1, dim=1)
-        key1 = key1.expand(self.batch, self.node_size, self.node_size, self.embedding_size)
-        value1 = self.wv1(node)
-        value1 = t.unsqueeze(value1, dim=1)
-        value1 = value1.expand(self.batch, self.node_size, self.node_size, self.embedding_size)
-        x = query1 * key1
-        x = x.view(self.batch, self.node_size, self.node_size, self.M, -1)
-        x = t.sum(x, dim=4)  # u=q^T x k
-        x = x / (self.dk ** 0.5)
-        x = F.softmax(x, dim=2)
-        # softmax() * V
-        x = t.unsqueeze(x, dim=4)
-        x = x.expand(self.batch, self.node_size, self.node_size, self.M, 16)
-        x = x.contiguous()
-        x = x.view(self.batch, self.node_size, self.node_size, -1)
-        Z = x * value1
-        Z = t.sum(Z, dim=2)  # MHA :(batch, node_size, embedding_size)
-        MHA_l = self.w1(Z)  # 输出得到MHA的Z, w1为attention的权重
-        ########## MHA layer1: Add&Norm, 残差连接(Skip connection)和批归一化(Batch Normalization, BN)  ###########
-        ######## h_i_hat, skip-connections #########
-        x = node_embedding + MHA_l  # h_i^{(l-1)} + MHA_i^l(h_1^{(l-1)}, \dots, h_n^{(l-1)})
-        # 第一个BN
-        x = x.permute(0, 2, 1)
-        x = self.BN11(x)
-        x = x.permute(0, 2, 1)
-        # x = t.tanh(x)
-        # FF
-        x1 = self.fw1(x)
-        x1 = F.relu(x1)
-        x1 = self.fb1(x1)
-        ######## h_i^(l) #########
-        x = x + x1
-        # 第二个BN
-        x = x.permute(0, 2, 1)
-        x = self.BN12(x)
-        x = x.permute(0, 2, 1)
-
-        x1 = x  # h_i^(l) n=1
-        #######################################################################
-        # 第2个MHA attention layer, 8层
-        query2 = self.wq2(x)
-        query2 = t.unsqueeze(query2, dim=2)
-        query2 = query2.expand(self.batch, self.node_size, self.node_size, self.embedding_size)
-        key2 = self.wk2(x)
-        key2 = t.unsqueeze(key2, dim=1)
-        key2 = key2.expand(self.batch, self.node_size, self.node_size, self.embedding_size)
-        value2 = self.wv2(x)
-        value2 = t.unsqueeze(value2, dim=1)
-        value2 = value2.expand(self.batch, self.node_size, self.node_size, self.embedding_size)
-        x = query2 * key2
-        x = x.view(self.batch, self.node_size, self.node_size, self.M, -1)
-        x = t.sum(x, dim=4)
-        x = x / (self.dk ** 0.5)
-        x = F.softmax(x, dim=2)
-        x = t.unsqueeze(x, dim=4)
-        x = x.expand(self.batch, self.node_size, self.node_size, self.M, 16)
-        x = x.contiguous()
-        x = x.view(self.batch, self.node_size, self.node_size, -1)
-        Z = x * value2
-        Z = t.sum(Z, dim=2)  # MHA :(batch, node_size, embedding_size)
-        MHA_l = self.w2(Z)  # 输出得到MHA的Z, w1为attention的权重
-        ########## MHA layer2: Add&Norm, 残差连接(Skip connection)和批归一化(Batch Normalization, BN)  ###########
-        ######## h_i_hat #########
-        x = MHA_l + x1
-        # 第一个BN
-        x = x.permute(0, 2, 1)
-        x = self.BN21(x)
-        x = x.permute(0, 2, 1)
-        # FF
-        x1 = self.fw2(x)
-        x1 = F.relu(x1)
-        x1 = self.fb2(x1)
-        ######## h_i^(l) #########
-        x = x + x1
-        # 第二个BN
-        x = x.permute(0, 2, 1)
-        x = self.BN22(x)
-        x = x.permute(0, 2, 1)
-
-        x1 = x  # h_i^(l) n=2
-        #######################################################################
-        # 第三层MHA
-        query3 = self.wq3(x)
-        query3 = t.unsqueeze(query3, dim=2)
-        query3 = query3.expand(self.batch, self.node_size, self.node_size, self.embedding_size)
-        key3 = self.wk3(x)
-        key3 = t.unsqueeze(key3, dim=1)
-        key3 = key3.expand(self.batch, self.node_size, self.node_size, self.embedding_size)
-        value3 = self.wv3(x)
-        value3 = t.unsqueeze(value3, dim=1)
-        value3 = value3.expand(self.batch, self.node_size, self.node_size, self.embedding_size)
-        x = query3 * key3
-        x = x.view(self.batch, self.node_size, self.node_size, self.M, -1)
-        x = t.sum(x, dim=4)
-        x = x / (self.dk ** 0.5)
-        x = F.softmax(x, dim=2)
-        x = t.unsqueeze(x, dim=4)
-        x = x.expand(self.batch, self.node_size, self.node_size, self.M, 16)
-        x = x.contiguous()
-        x = x.view(self.batch, self.node_size, self.node_size, -1)
-        Z = x * value3
-        Z = t.sum(Z, dim=2)
-        MHA_l = self.w3(Z)
-        ########## MHA layer3: Add&Norm, 残差连接(Skip connection)和批归一化(Batch Normalization, BN)  ###########
-        ######## h_i_hat #########
-        x = MHA_l + x1
-        #####################
-        # 第一个BN
-        x = x.permute(0, 2, 1)
-        x = self.BN31(x)
-        x = x.permute(0, 2, 1)
-        # FF
-        x1 = self.fw3(x)
-        x1 = F.relu(x1)
-        x1 = self.fb3(x1)
-        ######## h_i^(l) #########
-        x = x + x1
-        # 第二个BN
-        x = x.permute(0, 2, 1)
-        x = self.BN32(x)
-        x = x.permute(0, 2, 1)  # h_i^(l) n=3 (batch, node_size, embedding_size)
-        x = x.contiguous()
+        # query1 = self.wq1(node)
+        # query1 = t.unsqueeze(query1, dim=2)
+        # query1 = query1.expand(self.batch, self.node_size, self.node_size, self.embedding_size)
+        # key1 = self.wk1(node)
+        # key1 = t.unsqueeze(key1, dim=1)
+        # key1 = key1.expand(self.batch, self.node_size, self.node_size, self.embedding_size)
+        # value1 = self.wv1(node)
+        # value1 = t.unsqueeze(value1, dim=1)
+        # value1 = value1.expand(self.batch, self.node_size, self.node_size, self.embedding_size)
+        # x = query1 * key1
+        # x = x.view(self.batch, self.node_size, self.node_size, self.M, -1)
+        # x = t.sum(x, dim=4)  # u=q^T x k
+        # x = x / (self.dk ** 0.5)
+        # x = F.softmax(x, dim=2)
+        # # softmax() * V
+        # x = t.unsqueeze(x, dim=4)
+        # x = x.expand(self.batch, self.node_size, self.node_size, self.M, 16)
+        # x = x.contiguous()
+        # x = x.view(self.batch, self.node_size, self.node_size, -1)
+        # Z = x * value1
+        # Z = t.sum(Z, dim=2)  # MHA :(batch, node_size, embedding_size)
+        # MHA_l = self.w1(Z)  # 输出得到MHA的Z, w1为attention的权重
+        # ########## MHA layer1: Add&Norm, 残差连接(Skip connection)和批归一化(Batch Normalization, BN)  ###########
+        # ######## h_i_hat, skip-connections #########
+        # x = node_embedding + MHA_l  # h_i^{(l-1)} + MHA_i^l(h_1^{(l-1)}, \dots, h_n^{(l-1)})
+        # # 第一个BN
+        # x = x.permute(0, 2, 1)
+        # x = self.BN11(x)
+        # x = x.permute(0, 2, 1)
+        # # x = t.tanh(x)
+        # # FF
+        # x1 = self.fw1(x)
+        # x1 = F.relu(x1)
+        # x1 = self.fb1(x1)
+        # ######## h_i^(l) #########
+        # x = x + x1
+        # # 第二个BN
+        # x = x.permute(0, 2, 1)
+        # x = self.BN12(x)
+        # x = x.permute(0, 2, 1)
+        #
+        # x1 = x  # h_i^(l) n=1
+        # #######################################################################
+        # # 第2个MHA attention layer, 8层
+        # query2 = self.wq2(x)
+        # query2 = t.unsqueeze(query2, dim=2)
+        # query2 = query2.expand(self.batch, self.node_size, self.node_size, self.embedding_size)
+        # key2 = self.wk2(x)
+        # key2 = t.unsqueeze(key2, dim=1)
+        # key2 = key2.expand(self.batch, self.node_size, self.node_size, self.embedding_size)
+        # value2 = self.wv2(x)
+        # value2 = t.unsqueeze(value2, dim=1)
+        # value2 = value2.expand(self.batch, self.node_size, self.node_size, self.embedding_size)
+        # x = query2 * key2
+        # x = x.view(self.batch, self.node_size, self.node_size, self.M, -1)
+        # x = t.sum(x, dim=4)
+        # x = x / (self.dk ** 0.5)
+        # x = F.softmax(x, dim=2)
+        # x = t.unsqueeze(x, dim=4)
+        # x = x.expand(self.batch, self.node_size, self.node_size, self.M, 16)
+        # x = x.contiguous()
+        # x = x.view(self.batch, self.node_size, self.node_size, -1)
+        # Z = x * value2
+        # Z = t.sum(Z, dim=2)  # MHA :(batch, node_size, embedding_size)
+        # MHA_l = self.w2(Z)  # 输出得到MHA的Z, w1为attention的权重
+        # ########## MHA layer2: Add&Norm, 残差连接(Skip connection)和批归一化(Batch Normalization, BN)  ###########
+        # ######## h_i_hat #########
+        # x = MHA_l + x1
+        # # 第一个BN
+        # x = x.permute(0, 2, 1)
+        # x = self.BN21(x)
+        # x = x.permute(0, 2, 1)
+        # # FF
+        # x1 = self.fw2(x)
+        # x1 = F.relu(x1)
+        # x1 = self.fb2(x1)
+        # ######## h_i^(l) #########
+        # x = x + x1
+        # # 第二个BN
+        # x = x.permute(0, 2, 1)
+        # x = self.BN22(x)
+        # x = x.permute(0, 2, 1)
+        #
+        # x1 = x  # h_i^(l) n=2
+        # #######################################################################
+        # # 第三层MHA
+        # query3 = self.wq3(x)
+        # query3 = t.unsqueeze(query3, dim=2)
+        # query3 = query3.expand(self.batch, self.node_size, self.node_size, self.embedding_size)
+        # key3 = self.wk3(x)
+        # key3 = t.unsqueeze(key3, dim=1)
+        # key3 = key3.expand(self.batch, self.node_size, self.node_size, self.embedding_size)
+        # value3 = self.wv3(x)
+        # value3 = t.unsqueeze(value3, dim=1)
+        # value3 = value3.expand(self.batch, self.node_size, self.node_size, self.embedding_size)
+        # x = query3 * key3
+        # x = x.view(self.batch, self.node_size, self.node_size, self.M, -1)
+        # x = t.sum(x, dim=4)
+        # x = x / (self.dk ** 0.5)
+        # x = F.softmax(x, dim=2)
+        # x = t.unsqueeze(x, dim=4)
+        # x = x.expand(self.batch, self.node_size, self.node_size, self.M, 16)
+        # x = x.contiguous()
+        # x = x.view(self.batch, self.node_size, self.node_size, -1)
+        # Z = x * value3
+        # Z = t.sum(Z, dim=2)
+        # MHA_l = self.w3(Z)
+        # ########## MHA layer3: Add&Norm, 残差连接(Skip connection)和批归一化(Batch Normalization, BN)  ###########
+        # ######## h_i_hat #########
+        # x = MHA_l + x1
+        # #####################
+        # # 第一个BN
+        # x = x.permute(0, 2, 1)
+        # x = self.BN31(x)
+        # x = x.permute(0, 2, 1)
+        # # FF
+        # x1 = self.fw3(x)
+        # x1 = F.relu(x1)
+        # x1 = self.fb3(x1)
+        # ######## h_i^(l) #########
+        # x = x + x1
+        # # 第二个BN
+        # x = x.permute(0, 2, 1)
+        # x = self.BN32(x)
+        # x = x.permute(0, 2, 1)  # h_i^(l) n=3 (batch, node_size, embedding_size)
+        # x = x.contiguous()
 
         # graph embedding
-        graph_embedding_avg = t.mean(x, dim=1)  # 最后将所有节点的嵌入信息取平均得到整个图的嵌入信息(batch, embedding_size)
+        # graph_embedding_avg = t.mean(x, dim=1)  # 最后将所有节点的嵌入信息取平均得到整个图的嵌入信息(batch, embedding_size)
 
         ################################# decoder ######################################
         for i in range(self.node_size//2):  # decoder输出序列的长度不超过node_size * 2
