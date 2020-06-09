@@ -12,3 +12,4 @@ bin/
 *.txt
 tmp/
 __pycache__/
+outputs/
